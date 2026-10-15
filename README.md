@@ -2,8 +2,11 @@
 
 A Claude Code mod that gives the transcript an opencode-style compact look.
 
-- Tool calls between two replies fold into one line: `+ 3 commands, 2 edits, 1 thought`.
-- Click the line to list each call and thought; click a call to see Claude Code's full row, and `▾` to fold it again. Clicking a thought shows its text; clicking the text folds it.
+![compact-ui in a Claude Code session](docs/screenshot.png)
+
+- Tool calls between two replies fold into one line: `+ 3 commands, 2 edits, 1 thought +78 -7`.
+- Lines changed show as `+N -M`, on the folded line and on each call. Edits count from their patch; in a git repo, so do Bash commands, from the work tree before and after.
+- Click the line to list each call and thought; click a call to open Claude Code's own row for it, and click the call's line again to fold it. A thought shows a few words; clicked, its full text.
 - `/fold` expands or folds every run at once.
 - Your prompts get a purple left bar.
 - The turn line gains model, effort, tok/s and cost: `✻ Baked for 16s · done 9:21 AM · Opus 5.5 high · 19.5 tok/s · $0.42`.

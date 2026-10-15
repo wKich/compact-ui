@@ -1,5 +1,16 @@
 export type CompactThought = { at: number; text: string }
-export type CompactRun = { leader: string; ids: string[]; tools: string[]; thoughts: CompactThought[]; failed: number }
+export type CompactRun = {
+  leader: string
+  ids: string[]
+  tools: string[]
+  thoughts: CompactThought[]
+  failed: number
+  // Lines the run's finished Edit and Write calls added and removed.
+  added?: number
+  removed?: number
+  // The same per call, Bash commands included (from the work tree).
+  callStats?: Record<string, { added: number; removed: number }>
+}
 export type CompactRuns = { runOf: Record<string, string>; runs: Record<string, CompactRun> }
 export type CompactTurn = {
   durationMs: number

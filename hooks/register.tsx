@@ -41,6 +41,88 @@ export const summarize = (run: CompactRun): string => {
   return parts.join(', ')
 }
 
+// Lines a finished Edit or Write added and removed, from its patch; null for
+// any other result.
+export const diffStat = (result: unknown): { added: number; removed: number } | null => {
+  if (!result || typeof result !== 'object') return null
+  const r = result as { structuredPatch?: unknown; gitDiff?: { additions?: unknown; deletions?: unknown } }
+  if (Array.isArray(r.structuredPatch) && r.structuredPatch.length > 0) {
+    let added = 0
+    let removed = 0
+    for (const hunk of r.structuredPatch as ReadonlyArray<{ lines?: unknown }>) {
+      for (const line of Array.isArray(hunk.lines) ? (hunk.lines as unknown[]) : []) {
+        if (typeof line !== 'string') continue
+        if (line.startsWith('+')) added += 1
+        else if (line.startsWith('-')) removed += 1
+      }
+    }
+    return { added, removed }
+  }
+  const g = r.gitDiff
+  if (g && typeof g.additions === 'number' && typeof g.deletions === 'number') return { added: g.additions, removed: g.deletions }
+  // A file Write created has no patch: every line is new.
+  const w = result as { type?: unknown; content?: unknown }
+  if (w.type === 'create' && typeof w.content === 'string') return { added: w.content.split('\n').length, removed: 0 }
+  return null
+}
+
+// Lines changed against HEAD, per file: [added, removed].
+export type Worktree = Record<string, [number, number]>
+
+// `git diff --numstat` output; binary files (`-`) are left out.
+export const parseNumstat = (text: string): Worktree => {
+  const files: Worktree = {}
+  for (const line of text.split('\n')) {
+    const [a, d, path] = line.split('\t')
+    if (!path || a === '-' || d === '-') continue
+    files[path] = [Number(a), Number(d)]
+  }
+  return files
+}
+
+// `wc -l` output, one count per file, its total line left out.
+export const parseWc = (text: string): Record<string, number> => {
+  const counts: Record<string, number> = {}
+  for (const line of text.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(.+)$/)
+    if (m && m[2] !== 'total') counts[m[2] as string] = Number(m[1])
+  }
+  return counts
+}
+
+// What changed between two snapshots: lines a command added (or restored)
+// and removed (or reverted).
+export const worktreeDelta = (before: Worktree, after: Worktree): { added: number; removed: number } => {
+  let added = 0
+  let removed = 0
+  for (const path of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const [a0, d0] = before[path] ?? [0, 0]
+    const [a1, d1] = after[path] ?? [0, 0]
+    added += Math.max(0, a1 - a0) + Math.max(0, d0 - d1)
+    removed += Math.max(0, d1 - d0) + Math.max(0, a0 - a1)
+  }
+  return { added, removed }
+}
+
+// The work tree's changes against HEAD, with untracked files counted as
+// added whole; null outside a git repo or when git fails.
+async function worktree($: EngineInterface): Promise<Worktree | null> {
+  try {
+    const diff = await $.process.run(['git', 'diff', '--numstat', 'HEAD'], { timeoutMs: 5000 })
+    if (diff.exitCode !== 0) return null
+    const files = parseNumstat(diff.stdout)
+    const others = await $.process.run(['git', 'ls-files', '--others', '--exclude-standard', '-z'], { timeoutMs: 5000 })
+    const paths = others.stdout.split('\0').filter(Boolean).slice(0, 200)
+    if (paths.length > 0) {
+      const wc = await $.process.run(['wc', '-l', '--', ...paths], { timeoutMs: 5000 })
+      for (const [path, n] of Object.entries(parseWc(wc.stdout))) files[path] = [n, 0]
+    }
+    return files
+  } catch {
+    return null
+  }
+}
+
 export const prettyModel = (id: string): string => {
   const bare = id.replace(/\[.*?\]$/, '').replace(/^(us\.|eu\.)?anthropic\./, '').replace(/^claude-/, '')
   const m = bare.match(/^([a-z]+)-(\d+)(?:-(\d+))?/)
@@ -105,6 +187,16 @@ function lookup(s: CompactRuns, id: string, tool: string, isErrored: boolean) {
 
 const short = (path: string) => path.split('/').slice(-3).join('/')
 const firstLine = (text: string) => (text.split('\n').find(l => l.trim()) ?? '').trim()
+
+// A few words of `text` for a folded line: whole words up to `max`
+// characters, then an ellipsis when anything was left out.
+export const preview = (text: string, max = 60): string => {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  if (flat.length <= max) return flat
+  const cut = flat.slice(0, max)
+  const space = cut.lastIndexOf(' ')
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,.;:]+$/, '')}…`
+}
 
 // One compact line per call: a glyph and what the call was about.
 export const toolLine = (tool: string, input: unknown): [string, string] => {
@@ -178,7 +270,7 @@ export const register: Register = on => {
     type Block = { type: string; id?: string; name?: string; text?: string; thinking?: string }
     for (const block of e.message.content as ReadonlyArray<Block>) {
       if (block.type === 'thinking' || block.type === 'redacted_thinking') {
-        const text = (block.thinking ?? '').slice(0, 4000)
+        const text = (block.thinking ?? '').slice(0, 4000).trim()
         // Redacted or empty thinking has nothing to show.
         if (!text.trim()) continue
         const runId = segment.runId
@@ -210,11 +302,29 @@ export const register: Register = on => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // A Bash command's edits show only in the work tree: compare git's view
+    // of it before and after. Approximate, and only in a git repo.
+    const isTracked = (await read($, runsAtom)).runOf[e.tool_use_id] !== undefined
+    const before = isTracked && e.tool === 'Bash' ? await worktree($) : null
     const ran = await next(e)
-    if (ran.isError) {
+    const after = before ? await worktree($) : null
+    const shell = before && after ? worktreeDelta(before, after) : null
+    const stat = shell && shell.added + shell.removed > 0 ? shell : ran.isError ? null : diffStat(ran.result)
+    if (ran.isError || stat) {
       await update($, runsAtom, s => {
         const runId = s.runOf[e.tool_use_id]
-        return runId ? withRun(s, runId, r => ({ ...r, failed: r.failed + 1 })) : s
+        if (!runId) return s
+        return withRun(s, runId, r => ({
+          ...r,
+          failed: r.failed + (ran.isError ? 1 : 0),
+          ...(stat
+            ? {
+                added: (r.added ?? 0) + stat.added,
+                removed: (r.removed ?? 0) + stat.removed,
+                callStats: { ...r.callStats, [e.tool_use_id]: stat },
+              }
+            : {}),
+        }))
       })
     }
     return ran
@@ -273,21 +383,6 @@ export const register: Register = on => {
     if (await read($, expandAllAtom)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
 
-    // Level 2: the engine's own row, under a line that folds it back to level 1.
-    if (isOpen(toolKey(id))) {
-      const [glyph, label] = toolLine(e.props.tool, e.props.input)
-      return (
-        <Box flexDirection="column">
-          <Box paddingLeft={4}>
-            <Button plain key={`tool-${id}`} onPress={() => toggle($, toolKey(id))}>
-              <Text dimColor>{'▾ '}</Text>
-              <Text dimColor wrap="truncate-end">{`${glyph} ${label}`}</Text>
-            </Button>
-          </Box>
-          {await next(e)}
-        </Box>
-      )
-    }
     const isLeader = run.leader === id
     const isRunOpen = isOpen(runKey(runId))
 
@@ -298,6 +393,7 @@ export const register: Register = on => {
           <Button plain key={`run-${runId}`} onPress={() => toggle($, runKey(runId))}>
             <Text dimColor>{e.props.isRunning ? '~ ' : '+ '}{summarize(run)}</Text>
             {run.failed > 0 ? <Text color={ERROR}>{` (${run.failed} failed)`}</Text> : ''}
+            {...changeTexts(run.added, run.removed)}
           </Button>
         </Box>
       )
@@ -305,6 +401,9 @@ export const register: Register = on => {
 
     // Level 1: the thoughts that came before this call, then the call itself;
     // the run's last call also carries the thoughts after it.
+    // Level 2: the same one-line row, marked open, over the engine's own row
+    // for the call (its header and output). A click on the engine's row does
+    // not reach a plugin, so this line is the one that folds it.
     const at = run.ids.indexOf(id)
     const isLast = at === run.ids.length - 1
     const thoughts = run.thoughts
@@ -312,12 +411,19 @@ export const register: Register = on => {
       .filter(t => t.text.trim() && (t.at === at || (isLast && t.at > at)))
     const [glyph, label] = toolLine(e.props.tool, e.props.input)
     const color = e.props.isErrored ? ERROR : undefined
+    const isCallOpen = isOpen(toolKey(id))
+    const mark = e.props.isRunning ? '~ ' : isCallOpen ? '▾ ' : '› '
+    // A standalone row's output is drawn inside the engine's own row, so an
+    // opened call keeps that row, as the engine draws it, under ours.
+    const engineRow = isCallOpen ? await next(e) : null
+    const callStat = run.callStats?.[id] ?? (e.props.isRunning || e.props.isErrored ? null : diffStat(e.props.output))
 
     return (
       <Box flexDirection="column" paddingLeft={2}>
         {isLeader ? (
           <Button plain key={`run-${runId}`} onPress={() => foldRun($, runId, run)}>
             <Text dimColor>{'- '}{summarize(run)}</Text>
+            {...changeTexts(run.added, run.removed)}
           </Button>
         ) : null}
         {thoughts
@@ -325,27 +431,40 @@ export const register: Register = on => {
           .map(t => thoughtRow(t.i))}
         <Box paddingLeft={2}>
           <Button plain key={`tool-${id}`} onPress={() => toggle($, toolKey(id))}>
-            <Text dimColor>{e.props.isRunning ? '~ ' : '› '}</Text>
+            <Text dimColor>{mark}</Text>
             <Text color={color} dimColor={!color} wrap="truncate-end">{`${glyph} ${label}`}</Text>
+            {...changeTexts(callStat?.added, callStat?.removed)}
           </Button>
         </Box>
+        {engineRow}
         {thoughts.filter(t => t.at > at).map(t => thoughtRow(t.i))}
       </Box>
     )
 
+    function changeTexts(added = 0, removed = 0) {
+      if (added === 0 && removed === 0) return []
+      return [
+        <Text dimColor>{' '}</Text>,
+        <Text color="success">{`+${added}`}</Text>,
+        <Text dimColor>{' '}</Text>,
+        <Text color={ERROR}>{`-${removed}`}</Text>,
+      ]
+    }
+
     function thoughtRow(i: number) {
       const text = run.thoughts[i]?.text ?? ''
       const isThoughtOpen = text !== '' && isOpen(thoughtKey(runId, i))
+      // Folded: a few words of it. Opened: a plain header over the text.
       return (
         <Box key={`th-${runId}-${i}`} flexDirection="column" paddingLeft={2}>
           <Button plain key={`thought-${runId}-${i}`} onPress={() => toggle($, thoughtKey(runId, i))}>
-            <Text dimColor>{'› ∴ '}</Text>
-            <Text dimColor italic wrap="truncate-end">{text ? firstLine(text) : 'thought'}</Text>
+            <Text dimColor>{isThoughtOpen ? '▾ ∴ ' : '› ∴ '}</Text>
+            <Text dimColor italic wrap="truncate-end">{isThoughtOpen ? 'Thought' : preview(text) || 'Thought'}</Text>
           </Button>
           {isThoughtOpen ? (
             <Box paddingLeft={4}>
               <Button plain key={`thought-text-${runId}-${i}`} onPress={() => toggle($, thoughtKey(runId, i))}>
-                <Text dimColor italic>{text}</Text>
+                <Text dimColor italic>{text.trim()}</Text>
               </Button>
             </Box>
           ) : null}
@@ -390,7 +509,7 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     return (
       <Box borderStyle="quote" borderColor={ACCENT} paddingLeft={1}>
-        <Text>{e.props.text}</Text>
+        <Text>{e.props.text.trim()}</Text>
       </Box>
     )
   })
