@@ -1,0 +1,7 @@
+{
+  "name": "compact-ui",
+  "version": "0.1.0",
+  "description": "opencode-style compact transcript: tool runs fold into '+ N commands, N edits' lines that unfold step by step, and the turn line shows model, effort, tok/s and cost",
+  "author": { "name": "wKich" },
+  "types": "./types/index.d.ts"
+}
