@@ -3,6 +3,7 @@ export type CompactRun = { leader: string; ids: string[]; tools: string[]; thoug
 export type CompactRuns = { runOf: Record<string, string>; runs: Record<string, CompactRun> }
 export type CompactTurn = {
   durationMs: number
+  endedAt: number
   model: string
   effort: string
   outputTokens: number

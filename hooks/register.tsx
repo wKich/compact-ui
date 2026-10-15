@@ -32,7 +32,7 @@ export const summarize = (run: CompactRun): string => {
     const k = kindOf(tool)
     counts[k === -1 ? KINDS.length : k] += 1
   }
-  counts[2] = run.thoughts.length
+  counts[2] = run.thoughts.filter(t => t.text.trim()).length
   const parts = counts.flatMap((n, i) => {
     if (n === 0) return []
     const [one, many] = KINDS[i] ?? ['tool', 'tools']
@@ -58,6 +58,12 @@ export const fmtDuration = (ms: number): string => {
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m ${s % 60}s`
   return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
+export const fmtClock = (epochMs: number): string => {
+  const d = new Date(epochMs)
+  const h = d.getHours()
+  return `${h % 12 || 12}:${String(d.getMinutes()).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`
 }
 
 // Permission mode rides on every classic hook input.
@@ -173,6 +179,8 @@ export const register: Register = on => {
     for (const block of e.message.content as ReadonlyArray<Block>) {
       if (block.type === 'thinking' || block.type === 'redacted_thinking') {
         const text = (block.thinking ?? '').slice(0, 4000)
+        // Redacted or empty thinking has nothing to show.
+        if (!text.trim()) continue
         const runId = segment.runId
         if (!runId) segment.pending.push(text)
         else {
@@ -241,6 +249,7 @@ export const register: Register = on => {
       const usd = (await $.session.usage()).cost?.usd
       const turn: CompactTurn = {
         durationMs: e.durationMs,
+        endedAt: await $.clock.now(),
         model: t?.model || meta.model,
         effort: t?.effort ?? '',
         outputTokens: t?.tokens ?? 0,
@@ -300,7 +309,7 @@ export const register: Register = on => {
     const isLast = at === run.ids.length - 1
     const thoughts = run.thoughts
       .map((t, i) => ({ ...t, i }))
-      .filter(t => t.at === at || (isLast && t.at > at))
+      .filter(t => t.text.trim() && (t.at === at || (isLast && t.at > at)))
     const [glyph, label] = toolLine(e.props.tool, e.props.input)
     const color = e.props.isErrored ? ERROR : undefined
 
@@ -397,22 +406,20 @@ export const register: Register = on => {
           : best,
       null,
     )
-    const matches = turn !== null && Math.abs(turn.durationMs - e.props.durationMs) < 2000
-    const model = prettyModel(matches ? turn.model : meta.model)
+    if (turn === null || Math.abs(turn.durationMs - e.props.durationMs) >= 2000) return next(e)
     const secs = e.props.durationMs / 1000
+    const model = prettyModel(turn.model || meta.model)
     const parts = [
-      matches && turn.effort ? `${model} ${turn.effort}` : model,
-      matches && turn.outputTokens > 0 && secs > 0 ? `${(turn.outputTokens / secs).toFixed(1)} tok/s` : '',
-      matches && turn.costUsd !== null ? fmtCost(turn.costUsd) : '',
+      `✻ ${e.props.word} for ${fmtDuration(e.props.durationMs)}`,
+      turn.endedAt ? `done ${fmtClock(turn.endedAt)}` : '',
+      turn.effort ? `${model} ${turn.effort}` : model,
+      turn.outputTokens > 0 && secs > 0 ? `${(turn.outputTokens / secs).toFixed(1)} tok/s` : '',
+      turn.costUsd !== null ? fmtCost(turn.costUsd) : '',
     ].filter(Boolean)
-    const { Box, Text } = $.ui.resolve(e)
-    // The engine's own line (`✻ Baked for 16s · done 9:21 AM`), then ours.
-    return (
-      <Box>
-        {await next(e)}
-        <Text dimColor>{` · ${parts.join(' · ')}`}</Text>
-      </Box>
-    )
+    const { Text } = $.ui.resolve(e)
+    // One Text, so the line never splits next to the engine's own row:
+    // `✻ Baked for 16s · done 9:21 AM · Opus 5.5 high · 19.5 tok/s · $0.42`.
+    return <Text dimColor>{parts.join(' · ')}</Text>
   })
 
 }
