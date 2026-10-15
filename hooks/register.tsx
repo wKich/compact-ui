@@ -104,6 +104,19 @@ export const worktreeDelta = (before: Worktree, after: Worktree): { added: numbe
   return { added, removed }
 }
 
+type TextElement = ReturnType<EngineInterface['ui']['resolve']>['Text']
+
+// ` +N -M` in green and red, for a line's end; nothing when no lines changed.
+const lineCounts = (Text: TextElement, added = 0, removed = 0) => {
+  if (added === 0 && removed === 0) return []
+  return [
+    <Text dimColor>{' '}</Text>,
+    <Text color="success">{`+${added}`}</Text>,
+    <Text dimColor>{' '}</Text>,
+    <Text color={ERROR}>{`-${removed}`}</Text>,
+  ]
+}
+
 // The work tree's changes against HEAD, with untracked files counted as
 // added whole; null outside a git repo or when git fails.
 async function worktree($: EngineInterface): Promise<Worktree | null> {
@@ -259,8 +272,13 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // True once the reply has written text since the last prompt or run: a run
+  // that starts then sits under text, which the engine leaves no gap above.
+  let afterText = false
+
   on('prompt.submit', ($, e, next) => {
     closeSegment()
+    afterText = false
     return next(e)
   })
 
@@ -287,8 +305,10 @@ export const register: Register = on => {
         const pending = segment.pending.map(text => ({ at: 0, text }))
         segment.pending = []
         segment.tools += 1
+        const isAfterText = afterText
+        afterText = false
         await update($, runsAtom, s => {
-          const run = s.runs[runId] ?? { leader: runId, ids: [], tools: [], thoughts: pending, failed: 0 }
+          const run = s.runs[runId] ?? { leader: runId, ids: [], tools: [], thoughts: pending, failed: 0, afterText: isAfterText }
           return {
             runOf: { ...s.runOf, [id]: runId },
             runs: { ...s.runs, [runId]: { ...run, ids: [...run.ids, id], tools: [...run.tools, name] } },
@@ -296,6 +316,7 @@ export const register: Register = on => {
         })
       } else if (block.type === 'text' && block.text?.trim()) {
         closeSegment()
+        afterText = true
       }
     }
     return next(e)
@@ -385,11 +406,12 @@ export const register: Register = on => {
 
     const isLeader = run.leader === id
     const isRunOpen = isOpen(runKey(runId))
+    const gap = isLeader && run.afterText ? 1 : 0
 
     if (!isRunOpen) {
       if (!isLeader) return <Box display="none" />
       return (
-        <Box paddingLeft={2}>
+        <Box paddingLeft={2} marginTop={gap}>
           <Button plain key={`run-${runId}`} onPress={() => toggle($, runKey(runId))}>
             <Text dimColor>{e.props.isRunning ? '~ ' : '+ '}{summarize(run)}</Text>
             {run.failed > 0 ? <Text color={ERROR}>{` (${run.failed} failed)`}</Text> : ''}
@@ -419,7 +441,7 @@ export const register: Register = on => {
     const callStat = run.callStats?.[id] ?? (e.props.isRunning || e.props.isErrored ? null : diffStat(e.props.output))
 
     return (
-      <Box flexDirection="column" paddingLeft={2}>
+      <Box flexDirection="column" paddingLeft={2} marginTop={gap}>
         {isLeader ? (
           <Button plain key={`run-${runId}`} onPress={() => foldRun($, runId, run)}>
             <Text dimColor>{'- '}{summarize(run)}</Text>
@@ -441,14 +463,8 @@ export const register: Register = on => {
       </Box>
     )
 
-    function changeTexts(added = 0, removed = 0) {
-      if (added === 0 && removed === 0) return []
-      return [
-        <Text dimColor>{' '}</Text>,
-        <Text color="success">{`+${added}`}</Text>,
-        <Text dimColor>{' '}</Text>,
-        <Text color={ERROR}>{`-${removed}`}</Text>,
-      ]
+    function changeTexts(added?: number, removed?: number) {
+      return lineCounts(Text, added, removed)
     }
 
     function thoughtRow(i: number) {
@@ -496,9 +512,11 @@ export const register: Register = on => {
     if (!leads) return <Box display="none" />
     const shown = s.runs[runId] ? run : { ...run, ids: ids as string[], tools: e.props.calls.map(c => c.tool) }
     return (
-      <Box paddingLeft={2}>
+      <Box paddingLeft={2} marginTop={ids.includes(run.leader) && run.afterText ? 1 : 0}>
         <Button plain key={`run-${runId}`} onPress={() => toggle($, runKey(runId))}>
           <Text dimColor>{e.props.isActive ? '~ ' : '+ '}{summarize(shown)}</Text>
+          {shown.failed > 0 ? <Text color={ERROR}>{` (${shown.failed} failed)`}</Text> : ''}
+          {...lineCounts(Text, shown.added, shown.removed)}
         </Button>
       </Box>
     )

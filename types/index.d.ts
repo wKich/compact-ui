@@ -8,6 +8,8 @@ export type CompactRun = {
   // Lines the run's finished Edit and Write calls added and removed.
   added?: number
   removed?: number
+  // True when the run started right under reply text, so it draws a gap above.
+  afterText?: boolean
   // The same per call, Bash commands included (from the work tree).
   callStats?: Record<string, { added: number; removed: number }>
 }
