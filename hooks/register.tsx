@@ -294,7 +294,7 @@ export const register: Register = on => {
     if (!isRunOpen) {
       if (!isLeader) return <Box display="none" />
       return (
-        <Box paddingLeft={2} marginTop={1}>
+        <Box paddingLeft={2}>
           <Button plain key={`run-${runId}`} onPress={() => toggle($, runKey(runId))}>
             <Text dimColor>{e.props.isRunning ? '~ ' : '+ '}{summarize(run)}</Text>
             {run.failed > 0 ? <Text color={ERROR}>{` (${run.failed} failed)`}</Text> : ''}
@@ -314,7 +314,7 @@ export const register: Register = on => {
     const color = e.props.isErrored ? ERROR : undefined
 
     return (
-      <Box flexDirection="column" paddingLeft={2} marginTop={isLeader ? 1 : 0}>
+      <Box flexDirection="column" paddingLeft={2}>
         {isLeader ? (
           <Button plain key={`run-${runId}`} onPress={() => foldRun($, runId, run)}>
             <Text dimColor>{'- '}{summarize(run)}</Text>
@@ -377,7 +377,7 @@ export const register: Register = on => {
     if (!leads) return <Box display="none" />
     const shown = s.runs[runId] ? run : { ...run, ids: ids as string[], tools: e.props.calls.map(c => c.tool) }
     return (
-      <Box paddingLeft={2} marginTop={1}>
+      <Box paddingLeft={2}>
         <Button plain key={`run-${runId}`} onPress={() => toggle($, runKey(runId))}>
           <Text dimColor>{e.props.isActive ? '~ ' : '+ '}{summarize(shown)}</Text>
         </Button>
@@ -389,7 +389,7 @@ export const register: Register = on => {
     if (e.surface !== 'terminal' || e.props.isExpanded || e.props.origin.kind !== 'composer') return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return (
-      <Box borderStyle="quote" borderColor={ACCENT} paddingLeft={1} marginTop={1}>
+      <Box borderStyle="quote" borderColor={ACCENT} paddingLeft={1}>
         <Text>{e.props.text}</Text>
       </Box>
     )
@@ -416,10 +416,15 @@ export const register: Register = on => {
       turn.outputTokens > 0 && secs > 0 ? `${(turn.outputTokens / secs).toFixed(1)} tok/s` : '',
       turn.costUsd !== null ? fmtCost(turn.costUsd) : '',
     ].filter(Boolean)
-    const { Text } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
     // One Text, so the line never splits next to the engine's own row:
     // `✻ Baked for 16s · done 9:21 AM · Opus 5.5 high · 19.5 tok/s · $0.42`.
-    return <Text dimColor>{parts.join(' · ')}</Text>
+    // The margin sets it off from the reply above.
+    return (
+      <Box marginTop={1}>
+        <Text dimColor>{parts.join(' · ')}</Text>
+      </Box>
+    )
   })
 
 }
